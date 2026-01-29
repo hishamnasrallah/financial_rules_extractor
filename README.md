@@ -326,6 +326,6 @@ For questions or issues:
 
 <div align="center">
 
-**Built with ❤️ for Financial Compliance**
+**Built and developed by: Hisham Nasrallah**
 
 </div>
