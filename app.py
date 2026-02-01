@@ -15,6 +15,19 @@ from src.models import DocumentType
 from src.tracks import TracksRepository
 from src.config import config
 
+# Try to import new features (they may not exist yet)
+try:
+    from src.tracks_api import TracksAPI
+    TRACKS_API_AVAILABLE = True
+except ImportError:
+    TRACKS_API_AVAILABLE = False
+
+try:
+    from src.integrations import NotificationManager
+    INTEGRATIONS_AVAILABLE = True
+except ImportError:
+    INTEGRATIONS_AVAILABLE = False
+
 # Page configuration
 st.set_page_config(
     page_title="Financial Rules Extractor",
@@ -108,9 +121,20 @@ def main():
         
         # Navigation
         st.header("📑 Navigation")
+        
+        # Build navigation options
+        nav_options = ["Extract Rules", "View Tracks", "Batch Processing", "Results History"]
+        
+        # Add optional pages if features available
+        if TRACKS_API_AVAILABLE:
+            nav_options.insert(2, "Manage Tracks")
+        
+        if INTEGRATIONS_AVAILABLE:
+            nav_options.append("Integrations")
+        
         page = st.radio(
             "Select Page",
-            ["Extract Rules", "View Tracks", "Batch Processing", "Results History"],
+            nav_options,
             label_visibility="collapsed"
         )
         
@@ -139,10 +163,14 @@ def main():
         show_extract_page()
     elif page == "View Tracks":
         show_tracks_page()
+    elif page == "Manage Tracks":
+        show_manage_tracks_page()
     elif page == "Batch Processing":
         show_batch_page()
     elif page == "Results History":
         show_history_page()
+    elif page == "Integrations":
+        show_integrations_page()
 
 
 def show_extract_page():
@@ -536,6 +564,317 @@ def show_history_page():
             if st.button(f"View Details", key=f"view_{idx}"):
                 st.session_state.current_result = result
                 display_extraction_result(result)
+
+
+def show_manage_tracks_page():
+    """Show track management page (NEW)."""
+    st.header("🎛️ Track Management")
+    
+    if not TRACKS_API_AVAILABLE:
+        st.error("❌ TracksAPI module not available. Please ensure src/tracks_api.py exists.")
+        st.info("This feature allows dynamic management of financial tracks and rules.")
+        return
+    
+    # Initialize TracksAPI
+    tracks_api = TracksAPI()
+    tracks_list = tracks_api.get_all_tracks()  # Returns list of FinancialTrack objects
+    
+    # Convert to dictionary for easier access (using track_id attribute)
+    tracks = {track.track_id: track for track in tracks_list}
+    
+    st.info("💡 **Dynamic Track Management** - Add, edit, or remove rules without code changes!")
+    
+    # Add new rule section
+    with st.expander("➕ Add New Rule to Track", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            track_id = st.selectbox(
+                "Select Track",
+                options=list(tracks.keys()),
+                format_func=lambda x: f"{tracks[x].name_ar} ({tracks[x].name_en})"
+            )
+        
+        with col2:
+            rule_id = st.text_input("Rule ID", placeholder="e.g., CONTRACT_NEW_001")
+        
+        rule_desc_ar = st.text_area("Rule Description (Arabic)", placeholder="وصف القاعدة...")
+        rule_desc_en = st.text_area("Rule Description (English)", placeholder="Rule description...")
+        
+        if st.button("➕ Add Rule", type="primary"):
+            if rule_id and rule_desc_ar:
+                try:
+                    # TracksAPI expects text strings, not TrackRule objects
+                    tracks_api.add_track_rule(track_id, rule_desc_ar, rule_desc_en)
+                    st.success(f"✅ Rule '{rule_id}' added to {tracks[track_id].name_ar}!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Failed to add rule: {str(e)}")
+            else:
+                st.warning("⚠️ Please fill in Rule ID and Arabic Description")
+    
+    st.divider()
+    
+    # Display current tracks and rules
+    st.subheader("📋 Current Tracks & Rules")
+    
+    for track in tracks_list:
+        with st.expander(f"**{track.name_ar}** ({track.name_en}) - {len(track.current_rules)} rules", expanded=False):
+            st.write(f"**Definition:** {track.definition_ar}")
+            
+            if track.current_rules:
+                for idx, rule in enumerate(track.current_rules):
+                    col1, col2 = st.columns([4, 1])
+                    
+                    with col1:
+                        st.text(f"🔹 [{rule.rule_id}] {rule.description[:100]}{'...' if len(rule.description) > 100 else ''}")
+                    
+                    with col2:
+                        if st.button("🗑️ Remove", key=f"remove_{track.track_id}_{idx}"):
+                            try:
+                                tracks_api.remove_track_rule(track.track_id, rule.rule_id)
+                                st.success(f"✅ Removed rule '{rule.rule_id}'")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error: {str(e)}")
+            else:
+                st.info("No rules defined for this track yet.")
+    
+    # Export/Import section
+    st.divider()
+    st.subheader("💾 Import / Export")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Export Tracks**")
+        try:
+            # Generate export data directly for UI download
+            export_data = {
+                "version": "1.0.0",
+                "exported_at": datetime.now().isoformat(),
+                "tracks": {
+                    track.track_id: {
+                        "name_ar": track.name_ar,
+                        "name_en": track.name_en,
+                        "definition_ar": track.definition_ar,
+                        "definition_en": track.definition_en,
+                        "rules": [
+                            {
+                                "rule_id": rule.rule_id,
+                                "description": rule.description,
+                                "source": rule.source
+                            }
+                            for rule in track.current_rules
+                        ]
+                    }
+                    for track in tracks_list
+                }
+            }
+            
+            tracks_json = json.dumps(export_data, ensure_ascii=False, indent=2)
+            
+            st.download_button(
+                label="📥 Download tracks.json",
+                data=tracks_json,
+                file_name=f"tracks_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+        except Exception as e:
+            st.error(f"Export failed: {str(e)}")
+    
+    with col2:
+        st.write("**Import Tracks**")
+        import_file = st.file_uploader("Upload tracks.json", type=['json'], key="import_tracks")
+        if import_file:
+            if st.button("📤 Import"):
+                try:
+                    tracks_api.import_tracks(import_file.getvalue().decode('utf-8'))
+                    st.success("✅ Tracks imported successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Import failed: {str(e)}")
+    
+    # Statistics
+    st.divider()
+    st.subheader("📊 Statistics")
+    
+    try:
+        stats = tracks_api.get_statistics()
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Tracks", stats.get('total_tracks', len(tracks_list)))
+        col2.metric("Total Rules", stats.get('total_rules', sum(len(t.current_rules) for t in tracks_list)))
+        col3.metric("Version", stats.get('version', '1.0.0'))
+        col4.metric("Last Updated", stats.get('last_updated', 'Never')[:10] if stats.get('last_updated') else "Never")
+    except Exception as e:
+        st.error(f"Failed to load statistics: {str(e)}")
+        # Fallback statistics
+        col1, col2 = st.columns(2)
+        col1.metric("Total Tracks", len(tracks_list))
+        col2.metric("Total Rules", sum(len(t.current_rules) for t in tracks_list))
+
+
+def show_integrations_page():
+    """Show integrations configuration page (NEW)."""
+    st.header("🔌 External Integrations")
+    
+    if not INTEGRATIONS_AVAILABLE:
+        st.error("❌ Integrations module not available. Please ensure src/integrations.py exists.")
+        st.info("This feature enables Slack, Discord, Email, and Webhook notifications.")
+        return
+    
+    st.info("💡 **External Notifications** - Get notified when rule extraction completes!")
+    
+    # Configuration tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["💬 Slack", "🎮 Discord", "📧 Email", "🌐 Webhooks"])
+    
+    with tab1:
+        st.subheader("Slack Integration")
+        st.write("Send notifications to Slack channels via incoming webhooks.")
+        
+        slack_enabled = st.checkbox("Enable Slack Notifications", value=False)
+        slack_webhook = st.text_input(
+            "Slack Webhook URL",
+            type="password",
+            placeholder="https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+            help="Get this from Slack's Incoming Webhooks app"
+        )
+        slack_channel = st.text_input("Channel (optional)", placeholder="#financial-rules")
+        
+        if slack_enabled and slack_webhook:
+            if st.button("🧪 Test Slack Notification"):
+                try:
+                    from src.integrations import SlackIntegration
+                    slack = SlackIntegration(slack_webhook, slack_channel)
+                    success = slack.send_notification(
+                        title="Test Notification",
+                        message="This is a test from Financial Rules Agent!",
+                        status="success"
+                    )
+                    if success:
+                        st.success("✅ Slack notification sent successfully!")
+                    else:
+                        st.error("❌ Failed to send notification. Check your webhook URL.")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+        
+        st.code(f"""# Add to .env file:
+SLACK_WEBHOOK_URL={slack_webhook if slack_webhook else 'your-webhook-url'}
+SLACK_CHANNEL={slack_channel if slack_channel else '#channel-name'}
+ENABLE_NOTIFICATIONS=true""", language="bash")
+    
+    with tab2:
+        st.subheader("Discord Integration")
+        st.write("Send rich embeds to Discord channels via webhooks.")
+        
+        discord_enabled = st.checkbox("Enable Discord Notifications", value=False)
+        discord_webhook = st.text_input(
+            "Discord Webhook URL",
+            type="password",
+            placeholder="https://discord.com/api/webhooks/YOUR/WEBHOOK",
+            help="Create a webhook in your Discord server settings"
+        )
+        
+        if discord_enabled and discord_webhook:
+            if st.button("🧪 Test Discord Notification"):
+                try:
+                    from src.integrations import DiscordIntegration
+                    discord = DiscordIntegration(discord_webhook)
+                    success = discord.send_notification(
+                        title="Test Notification",
+                        message="This is a test from Financial Rules Agent!",
+                        status="success"
+                    )
+                    if success:
+                        st.success("✅ Discord notification sent successfully!")
+                    else:
+                        st.error("❌ Failed to send notification. Check your webhook URL.")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+        
+        st.code(f"""# Add to .env file:
+DISCORD_WEBHOOK_URL={discord_webhook if discord_webhook else 'your-webhook-url'}
+ENABLE_NOTIFICATIONS=true""", language="bash")
+    
+    with tab3:
+        st.subheader("Email Integration")
+        st.write("Send email notifications via SMTP.")
+        
+        email_enabled = st.checkbox("Enable Email Notifications", value=False)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            smtp_host = st.text_input("SMTP Host", placeholder="smtp.gmail.com")
+            smtp_user = st.text_input("SMTP Username", placeholder="your@email.com")
+            smtp_from = st.text_input("From Email", placeholder="noreply@example.com")
+        
+        with col2:
+            smtp_port = st.number_input("SMTP Port", value=587, min_value=1, max_value=65535)
+            smtp_password = st.text_input("SMTP Password", type="password")
+            notification_email = st.text_input("Send To", placeholder="recipient@example.com")
+        
+        if email_enabled and all([smtp_host, smtp_user, smtp_password, notification_email]):
+            if st.button("🧪 Test Email Notification"):
+                st.info("Email testing requires async execution. Add credentials to .env and test via CLI.")
+        
+        st.code(f"""# Add to .env file:
+SMTP_HOST={smtp_host if smtp_host else 'smtp.gmail.com'}
+SMTP_PORT={smtp_port}
+SMTP_USER={smtp_user if smtp_user else 'your@email.com'}
+SMTP_PASSWORD=your-password
+SMTP_FROM={smtp_from if smtp_from else 'noreply@example.com'}
+NOTIFICATION_EMAIL={notification_email if notification_email else 'recipient@example.com'}
+ENABLE_NOTIFICATIONS=true""", language="bash")
+    
+    with tab4:
+        st.subheader("Custom Webhook Integration")
+        st.write("Send notifications to any custom webhook endpoint.")
+        
+        webhook_enabled = st.checkbox("Enable Webhook Notifications", value=False)
+        webhook_url = st.text_input(
+            "Webhook URL",
+            placeholder="https://your-api.com/webhook"
+        )
+        webhook_method = st.selectbox("HTTP Method", ["POST", "PUT"], index=0)
+        
+        if webhook_enabled and webhook_url:
+            if st.button("🧪 Test Webhook"):
+                try:
+                    from src.integrations import WebhookIntegration
+                    webhook = WebhookIntegration(webhook_url, method=webhook_method)
+                    success = webhook.send_notification(
+                        title="Test Notification",
+                        message="This is a test from Financial Rules Agent!",
+                        status="success"
+                    )
+                    if success:
+                        st.success("✅ Webhook notification sent successfully!")
+                    else:
+                        st.error("❌ Failed to send notification. Check your webhook URL.")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+        
+        st.code(f"""# Add to .env file:
+CUSTOM_WEBHOOK_URL={webhook_url if webhook_url else 'https://your-api.com/webhook'}
+WEBHOOK_METHOD={webhook_method}
+ENABLE_NOTIFICATIONS=true""", language="bash")
+    
+    # Current configuration
+    st.divider()
+    st.subheader("📋 Current Configuration")
+    
+    st.info(f"""
+    **Configuration File:** `.env`
+    
+    To enable integrations:
+    1. Copy settings from tabs above to your `.env` file
+    2. Set `ENABLE_NOTIFICATIONS=true`
+    3. Restart the application
+    4. Notifications will be sent automatically after each extraction
+    """)
+
+
 
 
 if __name__ == "__main__":

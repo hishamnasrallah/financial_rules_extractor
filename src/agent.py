@@ -1,5 +1,5 @@
 """
-Main orchestrator for the Financial Rules Extraction Agent.
+Main orchestrator for the Financial Rules Extraction Agent with RAG support.
 """
 import time
 from typing import List, Optional, Dict, Any
@@ -11,11 +11,14 @@ from src.parser import DocumentParser
 from src.aixplain_client import AIXplainClient, IndexManager
 from src.rule_extractor import RuleExtractor, RuleMapper
 from src.gap_analyzer import GapAnalyzer, CoverageAnalyzer
+from src.integrations import NotificationManager
+from src.config import config
 
 
 class FinancialRulesAgent:
     """
     Main agent for extracting and analyzing financial rules from documents.
+    Now with TRUE RAG (Retrieval-Augmented Generation) support.
     """
     
     def __init__(self, api_key: Optional[str] = None):
@@ -25,7 +28,7 @@ class FinancialRulesAgent:
         Args:
             api_key: aiXplain API key (optional, defaults to config)
         """
-        logger.info("Initializing Financial Rules Extraction Agent")
+        logger.info("Initializing Financial Rules Extraction Agent with RAG capabilities")
         
         # Initialize components
         self.client = AIXplainClient(api_key)
@@ -36,6 +39,11 @@ class FinancialRulesAgent:
         self.gap_analyzer = GapAnalyzer()
         self.coverage_analyzer = CoverageAnalyzer()
         
+        # Initialize notification manager
+        self.notification_manager = NotificationManager()
+        if self.notification_manager.is_configured():
+            logger.info(f"Notifications enabled for: {', '.join(self.notification_manager.get_configured_channels())}")
+        
         # Initialize models (optional - system works with fallback methods)
         try:
             self.client.initialize_models()
@@ -43,28 +51,64 @@ class FinancialRulesAgent:
             logger.warning(f"Model initialization had issues: {e}")
             logger.info("System will use pattern-based extraction as fallback")
     
+    def _generate_track_queries(self) -> Dict[str, List[str]]:
+        """
+        Generate search queries for each financial track.
+        Used for RAG-based extraction.
+        
+        OPTIMIZED: Using 1 comprehensive query per track instead of 4
+        to reduce LLM calls while maintaining aiXplain usage.
+        
+        Returns:
+            Dictionary mapping track IDs to their queries
+        """
+        return {
+            'contracts': [
+                'ما هي جميع القواعد والشروط المتعلقة بالعقود والمستخلصات والترسية والمنافسات؟'
+            ],
+            'salaries': [
+                'ما هي جميع القواعد والشروط المتعلقة بالرواتب والحسميات والبدلات والدرجات الوظيفية؟'
+            ],
+            'invoices': [
+                'ما هي جميع القواعد والشروط المتعلقة بالفواتير والخدمات الاستهلاكية والتسعيرة الحكومية؟'
+            ]
+        }
+    
+    def _get_all_queries(self) -> List[str]:
+        """Get all queries for all tracks."""
+        all_queries = []
+        for queries in self._generate_track_queries().values():
+            all_queries.extend(queries)
+        return all_queries
+    
     def process_document(
         self, 
         name: str,
         url: Optional[str] = None,
         file_path: Optional[str] = None,
-        document_type: Optional[DocumentType] = None
+        document_type: Optional[DocumentType] = None,
+        use_rag: bool = None
     ) -> ExtractionResult:
         """
-        Process a document and extract financial rules.
+        Process a document and extract financial rules using RAG or legacy method.
         
         Args:
             name: Document name
             url: Document URL (for PDFs or web pages)
             file_path: Local file path
             document_type: Type of document (auto-detected if not provided)
+            use_rag: Whether to use RAG approach (defaults to config)
             
         Returns:
             ExtractionResult with extracted rules and gap analysis
         """
         start_time = time.time()
         
-        logger.info(f"Processing document: {name}")
+        # Determine if using RAG
+        if use_rag is None:
+            use_rag = config.app.use_rag
+        
+        logger.info(f"Processing document: {name} (RAG={'enabled' if use_rag else 'disabled'})")
         
         # Create document object
         if not document_type:
@@ -84,24 +128,45 @@ class FinancialRulesAgent:
         
         if document.status == DocumentStatus.FAILED:
             logger.error(f"Failed to parse document: {name}")
-            return ExtractionResult(
+            result = ExtractionResult(
                 document_id=document.document_id,
                 extracted_rules=[],
                 gaps=[],
                 statistics=self._get_empty_statistics('Document parsing failed'),
                 processing_time_seconds=time.time() - start_time
             )
+            # Send notification even on failure
+            if self.notification_manager.is_configured():
+                self.notification_manager.notify_extraction_complete(result, name)
+            return result
         
-        # Step 2: Index document (optional but recommended for search)
-        logger.info("Step 2: Indexing document")
-        try:
-            self.index_manager.index_documents([document])
-        except Exception as e:
-            logger.warning(f"Failed to index document: {e}")
+        # Step 2: Index document for RAG
+        if use_rag:
+            logger.info("Step 2: Indexing document with vector storage (RAG mode)")
+            try:
+                index_result = self.index_manager.index_single_document(
+                    document,
+                    use_chunking=True
+                )
+                logger.info(f"Indexed {index_result.get('num_chunks', 0)} chunks")
+            except Exception as e:
+                logger.warning(f"Failed to index document: {e}")
+                logger.info("Falling back to non-RAG extraction")
+                use_rag = False
         
         # Step 3: Extract rules
-        logger.info("Step 3: Extracting rules from document")
-        extracted_rules = self.rule_extractor.extract_rules_from_document(document)
+        if use_rag and self.client.indexed_chunks:
+            logger.info("Step 3: Extracting rules using RAG (retrieval-based)")
+            # Generate queries for all tracks
+            all_queries = self._get_all_queries()
+            extracted_rules = self.rule_extractor.extract_rules_with_retrieval(
+                document_id=document.document_id,
+                queries=all_queries,
+                document_name=document.name
+            )
+        else:
+            logger.info("Step 3: Extracting rules using legacy method (full document)")
+            extracted_rules = self.rule_extractor.extract_rules_from_document(document)
         
         # Step 4: Map rules to tracks
         logger.info("Step 4: Mapping rules to financial tracks")
@@ -114,6 +179,8 @@ class FinancialRulesAgent:
         # Step 6: Calculate statistics
         logger.info("Step 6: Calculating statistics")
         statistics = self._calculate_statistics(mapped_rules, gaps)
+        statistics['rag_enabled'] = use_rag
+        statistics['num_chunks_indexed'] = len(self.client.indexed_chunks)
         
         processing_time = time.time() - start_time
         
@@ -127,6 +194,13 @@ class FinancialRulesAgent:
         
         logger.info(f"Processing completed in {processing_time:.2f} seconds")
         logger.info(f"Extracted {len(mapped_rules)} rules, identified {len(gaps)} gaps")
+        
+        # Send notifications
+        if self.notification_manager.is_configured():
+            try:
+                self.notification_manager.notify_extraction_complete(result, name)
+            except Exception as e:
+                logger.warning(f"Failed to send notifications: {e}")
         
         return result
     
