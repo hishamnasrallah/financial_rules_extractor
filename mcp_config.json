@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "financial-rules-parser": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "env": {
+        "AIXPLAIN_API_KEY": "${AIXPLAIN_API_KEY}"
+      },
+      "description": "Saudi Financial Rules Document Parser with aiXplain integration",
+      "capabilities": {
+        "tools": true,
+        "resources": false,
+        "prompts": false
+      }
+    }
+  }
+}
